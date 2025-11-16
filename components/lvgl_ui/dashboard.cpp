@@ -51,10 +51,21 @@ static void animation_timer_cb(lv_timer_t *timer)
  */
 static lv_obj_t* create_gauge(lv_obj_t *parent, lv_align_t align, lv_coord_t x_ofs, lv_coord_t y_ofs)
 {
-    // Create meter (gauge) widget
-    lv_obj_t *meter = lv_meter_create(parent);
+    // Create a container to hold the rotated gauge (larger to accommodate rotation)
+    lv_obj_t *container = lv_obj_create(parent);
+    lv_obj_set_size(container, 170, 170);  // Larger container for rotated gauge
+    lv_obj_align(container, align, x_ofs, y_ofs);
+    lv_obj_set_style_bg_opa(container, LV_OPA_0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(container, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(container, 0, LV_PART_MAIN);
+    
+    // Create meter (gauge) widget inside the container
+    lv_obj_t *meter = lv_meter_create(container);
     lv_obj_set_size(meter, 120, 120);
-    lv_obj_align(meter, align, x_ofs, y_ofs);
+    lv_obj_center(meter);  // Center the gauge in the container
+    
+    // NOTE: Rotation disabled - transform causes rendering issues in LVGL 8.4
+    // lv_obj_set_style_transform_angle(meter, 900, LV_PART_MAIN);
     
     // Remove the default background
     lv_obj_set_style_bg_opa(meter, LV_OPA_0, LV_PART_MAIN);
@@ -64,7 +75,8 @@ static lv_obj_t* create_gauge(lv_obj_t *parent, lv_align_t align, lv_coord_t x_o
     lv_meter_scale_t *scale = lv_meter_add_scale(meter);
     lv_meter_set_scale_ticks(meter, scale, 21, 2, 10, lv_palette_main(LV_PALETTE_GREY));
     lv_meter_set_scale_major_ticks(meter, scale, 5, 4, 15, lv_color_black(), 15);
-    lv_meter_set_scale_range(meter, scale, 0, 100, 270, 135);
+    // Rotate the scale by changing start angle: 225° makes it rotated 90° clockwise from original 135°
+    lv_meter_set_scale_range(meter, scale, 0, 100, 270, 225);
     
     // Add a three arc indicator with different colors
     lv_meter_indicator_t *indic1 = lv_meter_add_arc(meter, scale, 8, lv_palette_main(LV_PALETTE_RED), 0);
@@ -86,15 +98,17 @@ static lv_obj_t* create_gauge(lv_obj_t *parent, lv_align_t align, lv_coord_t x_o
     // Store the needle indicator in the meter's user data for later updates
     lv_obj_set_user_data(meter, indic_needle);
     
-    return meter;
+    return container;  // Return the container, not the meter
 }
 
 /**
  * @brief Create a label for gauge value display
  */
-static lv_obj_t* create_gauge_label(lv_obj_t *parent, lv_obj_t *gauge)
+static lv_obj_t* create_gauge_label(lv_obj_t *parent, lv_obj_t *gauge_container)
 {
-    lv_obj_t *label = lv_label_create(gauge);
+    // Get the actual meter widget (first child of the container)
+    lv_obj_t *meter = lv_obj_get_child(gauge_container, 0);
+    lv_obj_t *label = lv_label_create(meter);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
     lv_label_set_text(label, "0.0");
@@ -115,12 +129,13 @@ void dashboard_init(void)
     // Set screen background to dark
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), LV_PART_MAIN);
     
-    // Create Gauge 1 (Bottom Left) - create gauges first so animation is on top
-    gauge1 = create_gauge(scr, LV_ALIGN_BOTTOM_LEFT, 20, -20);
+    // Create Gauge 1 (Bottom Left corner) - spread further apart
+    // Container is 170x170, screen is 320 wide - gauges at far edges
+    gauge1 = create_gauge(scr, LV_ALIGN_BOTTOM_LEFT, -30, +20);
     gauge1_label = create_gauge_label(scr, gauge1);
     
-    // Create Gauge 2 (Bottom Right)
-    gauge2 = create_gauge(scr, LV_ALIGN_BOTTOM_RIGHT, -20, -20);
+    // Create Gauge 2 (Bottom Right corner, moved up 700 units total)
+    gauge2 = create_gauge(scr, LV_ALIGN_BOTTOM_RIGHT, -180, -330);
     gauge2_label = create_gauge_label(scr, gauge2);
     
     // Add labels to the left of gauges
@@ -177,10 +192,12 @@ void dashboard_update_sensor1(float value)
     sensor1_value = value;
     
     if (gauge1 && gauge1_label) {
+        // Get the actual meter widget (first child of the container)
+        lv_obj_t *meter = lv_obj_get_child(gauge1, 0);
         // Update needle
-        lv_meter_indicator_t *indic = (lv_meter_indicator_t*)lv_obj_get_user_data(gauge1);
+        lv_meter_indicator_t *indic = (lv_meter_indicator_t*)lv_obj_get_user_data(meter);
         if (indic) {
-            lv_meter_set_indicator_value(gauge1, indic, (int32_t)value);
+            lv_meter_set_indicator_value(meter, indic, (int32_t)value);
         }
         
         // Update center label
@@ -199,10 +216,12 @@ void dashboard_update_sensor2(float value)
     sensor2_value = value;
     
     if (gauge2 && gauge2_label) {
+        // Get the actual meter widget (first child of the container)
+        lv_obj_t *meter = lv_obj_get_child(gauge2, 0);
         // Update needle
-        lv_meter_indicator_t *indic = (lv_meter_indicator_t*)lv_obj_get_user_data(gauge2);
+        lv_meter_indicator_t *indic = (lv_meter_indicator_t*)lv_obj_get_user_data(meter);
         if (indic) {
-            lv_meter_set_indicator_value(gauge2, indic, (int32_t)value);
+            lv_meter_set_indicator_value(meter, indic, (int32_t)value);
         }
         
         // Update center label
