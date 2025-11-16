@@ -1,0 +1,21 @@
+# Build output
+build/
+sdkconfig.old
+
+# Dependencies
+dependencies.lock
+managed_components/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
