@@ -8,6 +8,11 @@ static const char *TAG = "dashboard";
 LV_IMG_DECLARE(frame1);
 LV_IMG_DECLARE(frame2);
 LV_IMG_DECLARE(frame3);
+LV_IMG_DECLARE(frame4);
+LV_IMG_DECLARE(frame5);
+LV_IMG_DECLARE(frame6);
+LV_IMG_DECLARE(frame7);
+LV_IMG_DECLARE(frame8);
 
 // UI Objects
 static lv_obj_t *animation_img = NULL;
@@ -21,10 +26,15 @@ static lv_timer_t *anim_timer = NULL;
 static uint8_t current_frame = 0;
 
 // Animation frames (C array image references)
-static const lv_img_dsc_t *anim_frames[3] = {
+static const lv_img_dsc_t *anim_frames[8] = {
     &frame1,
     &frame2,
-    &frame3
+    &frame3,
+    &frame4,
+    &frame5,
+    &frame6,
+    &frame7,
+    &frame8
 };
 
 // Sensor values
@@ -37,7 +47,7 @@ static float sensor2_value = 50.0f;
 static void animation_timer_cb(lv_timer_t *timer)
 {
     // Cycle through frames
-    current_frame = (current_frame + 1) % 3;
+    current_frame = (current_frame + 1) % 8;
     
     // Display the frame from C array
     if (animation_img) {
