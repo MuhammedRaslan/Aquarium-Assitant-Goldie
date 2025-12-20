@@ -1,2 +1,16 @@
-idf_component_register(SRCS "main.cpp"
-                    INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "gemini_api.cpp"
+        "blynk_integration.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_http_client
+        esp-tls
+        json
+        spiffs
+        lvgl_ui
+)

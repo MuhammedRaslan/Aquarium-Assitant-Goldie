@@ -20,6 +20,8 @@
 #include "esp_lvgl_port.h"
 
 #include "dashboard.h"
+#include "gemini_api.h"
+#include "blynk_integration.h"
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -41,7 +43,7 @@
 
 #define EXAMPLE_PIN_BUTTON GPIO_NUM_0
 
-#define EXAMPLE_DISPLAY_ROTATION 0
+#define EXAMPLE_DISPLAY_ROTATION 90
 
 #if EXAMPLE_DISPLAY_ROTATION == 90 || EXAMPLE_DISPLAY_ROTATION == 270
 #define EXAMPLE_LCD_H_RES 480
@@ -90,6 +92,15 @@ extern "C" void app_main(void)
     // Initialize SPIFFS for image storage
     spiffs_init();
     
+    // Initialize WiFi for Gemini AI
+    ESP_LOGI(TAG, "Initializing WiFi for AI Assistant...");
+    bool wifi_ok = gemini_init_wifi();
+    if (wifi_ok) {
+        ESP_LOGI(TAG, "WiFi connected - AI Assistant ready!");
+    } else {
+        ESP_LOGW(TAG, "WiFi connection failed - AI Assistant will use offline mode");
+    }
+    
     i2c_bus_init();
     io_expander_init();
     esp_3inch5_display_port_init(&io_handle, &panel_handle, LCD_BUFFER_SIZE);
@@ -99,7 +110,10 @@ extern "C" void app_main(void)
     // esp_es8311_port_init(i2c_bus_handle);
     // esp_qmi8658_port_init(i2c_bus_handle);
     // esp_pcf85063_port_init(i2c_bus_handle);
-    // esp_sdcard_port_init();
+    
+    // Initialize SD card for animation frames
+    esp_sdcard_port_init();
+    
     // esp_camera_port_init(I2C_PORT_NUM);
     // esp_wifi_port_init("WSTEST", "waveshare0755");
 
@@ -111,27 +125,67 @@ extern "C" void app_main(void)
     {
         // Initialize IoT Dashboard with gauges and animation
         dashboard_init();
+        
+        // Update calendar with current time if WiFi connected
+        if (wifi_ok) {
+            dashboard_update_calendar();
+            
+            // Initialize Blynk for mobile app monitoring
+            ESP_LOGI(TAG, "Initializing Blynk for mobile dashboard...");
+            blynk_init();
+        }
+        
         lvgl_port_unlock();
     }
     
     // Demo: Update sensor values periodically (for testing)
     // In real application, update these based on actual sensor readings
-    static float sensor1_val = 0.0f;
-    static float sensor2_val = 50.0f;
+    static float sensor1_val = 25.0f;  // Temperature: 25°C
+    static float sensor2_val = 8.0f;   // Oxygen: 8.0 mg/L
+    static float ph_val = 7.2f;        // pH: 7.2
+    static float feed_hours = 2.5f;    // Hours since feeding
+    static float clean_days = 3.0f;    // Days since cleaning
+    static int update_count = 0;
+    
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         
         if (lvgl_port_lock(0)) {
             // Simulate sensor value changes
-            sensor1_val += 5.0f;
-            if (sensor1_val > 100.0f) sensor1_val = 0.0f;
+            sensor1_val += 0.5f;
+            if (sensor1_val > 30.0f) sensor1_val = 22.0f;
             
-            sensor2_val -= 3.0f;
-            if (sensor2_val < 0.0f) sensor2_val = 100.0f;
+            sensor2_val -= 0.2f;
+            if (sensor2_val < 6.0f) sensor2_val = 9.0f;
             
             dashboard_update_sensor1(sensor1_val);
             dashboard_update_sensor2(sensor2_val);
             lvgl_port_unlock();
+            
+            // Update Blynk every 10 seconds (every 5th iteration)
+            update_count++;
+            if (wifi_ok && update_count >= 5) {
+                update_count = 0;
+                
+                // Increment feeding/cleaning timers
+                feed_hours += 0.01f;
+                clean_days += 0.001f;
+                
+                // Determine mood based on sensor values
+                const char *mood = "HAPPY";
+                if (sensor1_val < 24.0f || sensor1_val > 26.0f || 
+                    sensor2_val < 7.0f || sensor2_val > 9.0f) {
+                    mood = "SAD";
+                }
+                
+                // Send to Blynk
+                blynk_send_all_data(sensor1_val, sensor2_val, ph_val,
+                                   feed_hours, clean_days, mood, 
+                                   "AI advice appears here when quota resets");
+                
+                ESP_LOGI(TAG, "Sent data to Blynk: Temp=%.1f, O2=%.1f, pH=%.1f, Mood=%s",
+                        sensor1_val, sensor2_val, ph_val, mood);
+            }
         }
     }
 }
