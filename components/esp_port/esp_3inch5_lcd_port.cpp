@@ -49,10 +49,12 @@ RTC_NOINIT_ATTR uint32_t reset_flag = 0;
 
 void soft_reset_once(void)
 {
+    // STABILIZATION FIX: Remove automatic restart on power-on
+    // Software reboots are forbidden - system must remain stable
     if (esp_reset_reason() == ESP_RST_POWERON)
     {
-        fflush(stdout);
-        esp_restart();
+        ESP_LOGI(TAG, "Power-on reset detected - continuing without restart");
+        // No esp_restart() - let system initialize normally
     }
 }
 

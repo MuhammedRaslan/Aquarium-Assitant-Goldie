@@ -14,16 +14,22 @@ extern "C" {
 void dashboard_init(void);
 
 /**
- * @brief Update sensor 1 gauge value (Temperature in Celsius)
- * @param value Temperature value (0-100)
+ * @brief Update ammonia level (ppm)
+ * @param value Ammonia in ppm (0 is ideal, >0.5 is critical)
  */
-void dashboard_update_sensor1(float value);
+void dashboard_update_ammonia(float value);
 
 /**
- * @brief Update sensor 2 gauge value (Oxygen level in mg/L)
- * @param value Oxygen value (0-100)
+ * @brief Update nitrite level (ppm)
+ * @param value Nitrite in ppm (0 is ideal, >0.5 is critical)
  */
-void dashboard_update_sensor2(float value);
+void dashboard_update_nitrite(float value);
+
+/**
+ * @brief Update nitrate level (ppm)
+ * @param value Nitrate in ppm (<20 safe, 20-40 warning, >40 critical)
+ */
+void dashboard_update_nitrate(float value);
 
 /**
  * @brief Update pH level
@@ -66,6 +72,18 @@ uint8_t dashboard_get_animation_category(void);
  * @brief Update calendar display with current date/time
  */
 void dashboard_update_calendar(void);
+
+/**
+ * @brief Simulate feeding time (for testing/demo)
+ * @param hours_ago Hours since last feeding
+ */
+void dashboard_simulate_feed_time(float hours_ago);
+
+/**
+ * @brief Simulate cleaning time (for testing/demo)
+ * @param days_ago Days since last cleaning
+ */
+void dashboard_simulate_clean_time(float days_ago);
 
 #ifdef __cplusplus
 }

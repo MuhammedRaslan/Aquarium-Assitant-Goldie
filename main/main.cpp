@@ -6,6 +6,8 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include "esp_timer.h"
+
 #include "driver/gpio.h"
 
 #include "driver/i2c_master.h"
@@ -37,6 +39,8 @@
 #include "esp_sdcard_port.h"
 #include "esp_wifi_port.h"
 #include "esp_3inch5_lcd_port.h"
+
+#include "task_coordinator.h"
 
 #define EXAMPLE_PIN_I2C_SDA GPIO_NUM_8
 #define EXAMPLE_PIN_I2C_SCL GPIO_NUM_7
@@ -80,26 +84,30 @@ void spiffs_init(void);
 
 extern "C" void app_main(void)
 {
-    // Initialize NVS
+    // Initialize NVS (graceful failure - system can run without NVS)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+        ESP_LOGW(TAG, "NVS needs erase, attempting recovery...");
+        ret = nvs_flash_erase();
+        if (ret == ESP_OK) {
+            ret = nvs_flash_init();
+        }
     }
-    ESP_ERROR_CHECK(ret);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed (%s) - WiFi config will not persist", esp_err_to_name(ret));
+        // Continue anyway - system can run without NVS
+    } else {
+        ESP_LOGI(TAG, "NVS initialized successfully");
+    }
     
     // Initialize SPIFFS for image storage
     spiffs_init();
     
-    // Initialize WiFi for Gemini AI
-    ESP_LOGI(TAG, "Initializing WiFi for AI Assistant...");
-    bool wifi_ok = gemini_init_wifi();
-    if (wifi_ok) {
-        ESP_LOGI(TAG, "WiFi connected - AI Assistant ready!");
-    } else {
-        ESP_LOGW(TAG, "WiFi connection failed - AI Assistant will use offline mode");
-    }
+    // WiFi initialization moved to background task (non-blocking)
+    // System will start in OFFLINE mode and transition to ONLINE when ready
+    ESP_LOGI(TAG, "WiFi will initialize in background - UI starting immediately");
     
     i2c_bus_init();
     io_expander_init();
@@ -121,72 +129,46 @@ extern "C" void app_main(void)
     esp_3inch5_brightness_port_set(80);
     lv_port_init();
     
+    // Initialize task coordinator (Step 0 - creates idle background tasks)
+    // NO BEHAVIORAL CHANGES - tasks are stubs, queues unused
+    task_coordinator_init();
+    
     if (lvgl_port_lock(0))
     {
         // Initialize IoT Dashboard with gauges and animation
         dashboard_init();
         
-        // Update calendar with current time if WiFi connected
-        if (wifi_ok) {
-            dashboard_update_calendar();
-            
-            // Initialize Blynk for mobile app monitoring
-            ESP_LOGI(TAG, "Initializing Blynk for mobile dashboard...");
-            blynk_init();
-        }
+        // WiFi/Blynk initialization happens in background
+        // Calendar and Blynk will activate automatically when WiFi connects
+        // Dashboard starts immediately in OFFLINE mode
         
         lvgl_port_unlock();
     }
     
-    // Demo: Update sensor values periodically (for testing)
-    // In real application, update these based on actual sensor readings
-    static float sensor1_val = 25.0f;  // Temperature: 25°C
-    static float sensor2_val = 8.0f;   // Oxygen: 8.0 mg/L
-    static float ph_val = 7.2f;        // pH: 7.2
-    static float feed_hours = 2.5f;    // Hours since feeding
-    static float clean_days = 3.0f;    // Days since cleaning
-    static int update_count = 0;
+    // Real deployment mode - values come from Parameter Menu or future sensors
+    ESP_LOGI(TAG, "=== REAL DEPLOYMENT MODE - Use Parameter Menu to set values ===");
+    ESP_LOGI(TAG, "To update water parameters:");
+    ESP_LOGI(TAG, "  1. Tap 'Parameters' button on dashboard");
+    ESP_LOGI(TAG, "  2. Enter Ammonia, Nitrite, Nitrate, pH values");
+    ESP_LOGI(TAG, "  3. Values will be used for mood calculation and Blynk updates");
+    
+    // STEP 5: Blynk sync moved to wifi_task (via dashboard snapshot publisher)
+    // Blynk updates now occur automatically every 30 seconds from LVGL timer
+    // See: dashboard.cpp - blynk_snapshot_publisher() and task_coordinator.cpp - wifi_task()
+    ESP_LOGI(TAG, "Blynk sync running on wifi_task (30s automatic updates)");
     
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(30000));  // Keep alive delay
         
-        if (lvgl_port_lock(0)) {
-            // Simulate sensor value changes
-            sensor1_val += 0.5f;
-            if (sensor1_val > 30.0f) sensor1_val = 22.0f;
-            
-            sensor2_val -= 0.2f;
-            if (sensor2_val < 6.0f) sensor2_val = 9.0f;
-            
-            dashboard_update_sensor1(sensor1_val);
-            dashboard_update_sensor2(sensor2_val);
-            lvgl_port_unlock();
-            
-            // Update Blynk every 10 seconds (every 5th iteration)
-            update_count++;
-            if (wifi_ok && update_count >= 5) {
-                update_count = 0;
-                
-                // Increment feeding/cleaning timers
-                feed_hours += 0.01f;
-                clean_days += 0.001f;
-                
-                // Determine mood based on sensor values
-                const char *mood = "HAPPY";
-                if (sensor1_val < 24.0f || sensor1_val > 26.0f || 
-                    sensor2_val < 7.0f || sensor2_val > 9.0f) {
-                    mood = "SAD";
-                }
-                
-                // Send to Blynk
-                blynk_send_all_data(sensor1_val, sensor2_val, ph_val,
-                                   feed_hours, clean_days, mood, 
-                                   "AI advice appears here when quota resets");
-                
-                ESP_LOGI(TAG, "Sent data to Blynk: Temp=%.1f, O2=%.1f, pH=%.1f, Mood=%s",
-                        sensor1_val, sensor2_val, ph_val, mood);
-            }
-        }
+        // In real deployment, integrate sensor readings here:
+        // TODO: Replace manual parameter entry with actual sensor readings:
+        //   - Read ammonia from sensor → dashboard_update_ammonia()
+        //   - Read nitrite from sensor → dashboard_update_nitrite()
+        //   - Read nitrate from sensor → dashboard_update_nitrate()
+        //   - Read pH from sensor → dashboard_update_ph()
+        
+        // Note: Blynk updates are now handled by wifi_task automatically
+        // No need to call blynk_send_all_data() here
     }
 }
 
@@ -200,22 +182,61 @@ void i2c_bus_init(void)
     i2c_mst_config.glitch_ignore_cnt = 7;
     i2c_mst_config.flags.enable_internal_pullup = 1;
 
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &i2c_bus_handle));
+    esp_err_t ret = i2c_new_master_bus(&i2c_mst_config, &i2c_bus_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C master bus init failed (%s) - hardware peripherals unavailable", esp_err_to_name(ret));
+        // Don't reboot - display may still work
+        i2c_bus_handle = NULL;
+    } else {
+        ESP_LOGI(TAG, "I2C bus initialized successfully");
+    }
 }
 
 void io_expander_init(void)
 {
-    ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca9554(i2c_bus_handle, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &expander_handle));
-    ESP_ERROR_CHECK(esp_io_expander_set_dir(expander_handle,  IO_EXPANDER_PIN_NUM_1, IO_EXPANDER_OUTPUT));
-    ESP_ERROR_CHECK(esp_io_expander_set_level(expander_handle, IO_EXPANDER_PIN_NUM_1, 0));
+    // Graceful failure handling - IO expander is optional
+    if (i2c_bus_handle == NULL) {
+        ESP_LOGW(TAG, "I2C bus not available - skipping IO expander init");
+        expander_handle = NULL;
+        return;
+    }
+    
+    esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus_handle, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &expander_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "IO expander init failed (%s) - display power control unavailable", esp_err_to_name(ret));
+        expander_handle = NULL;
+        return;
+    }
+    
+    ret = esp_io_expander_set_dir(expander_handle, IO_EXPANDER_PIN_NUM_1, IO_EXPANDER_OUTPUT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "IO expander set_dir failed");
+        return;
+    }
+    
+    ret = esp_io_expander_set_level(expander_handle, IO_EXPANDER_PIN_NUM_1, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "IO expander set_level(0) failed");
+    }
     vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_ERROR_CHECK(esp_io_expander_set_level(expander_handle, IO_EXPANDER_PIN_NUM_1, 1));
+    
+    ret = esp_io_expander_set_level(expander_handle, IO_EXPANDER_PIN_NUM_1, 1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "IO expander set_level(1) failed");
+    }
     vTaskDelay(pdMS_TO_TICKS(100));
+    
+    ESP_LOGI(TAG, "IO expander initialized successfully");
 }
 
 void lv_port_init(void)
 {
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    /* Reduce priority from 4 to 2 to prevent IDLE0 starvation
+     * Priority 2 is sufficient for UI responsiveness while ensuring
+     * IDLE task (priority 0) can run and service the task watchdog */
+    port_cfg.task_priority = 2;
+    port_cfg.task_affinity = 0;  // Pin to Core 0 (explicit)
     lvgl_port_init(&port_cfg);
     ESP_LOGI(TAG, "Adding LCD screen");
     lvgl_port_display_cfg_t display_cfg = {

@@ -13,4 +13,5 @@ idf_component_register(
         json
         spiffs
         lvgl_ui
+        task_coordinator
 )
