@@ -299,9 +299,11 @@ bool gemini_query_aquarium(float ammonia_ppm, float nitrite_ppm, float nitrate_p
         "⏰ Last fed: %.1f hours ago\n\n"
         "Water maintenance:\n"
         "💧 Water change interval: every %d days\n"
-        "🧽 Last cleaned: %.1f days ago\n",
+        "🧽 Last cleaned: %.1f days ago\n\n"
+        "MOOD STATUS:\n"
+        "%s\n",
         ammonia_ppm, nitrite_ppm, nitrate_ppm, feeds_per_day, hours_since_feed, 
-        water_change_interval, days_since_clean);
+        water_change_interval, days_since_clean, latest_mood_reason);
     
     // Append medication context if available
     if (latest_med_calculation[0] != '\0') {

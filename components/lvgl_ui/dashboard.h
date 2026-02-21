@@ -91,6 +91,12 @@ void dashboard_simulate_clean_time(float days_ago);
  */
 extern char latest_med_calculation[512];
 
+/**
+ * @brief Latest mood reason explanation (for AI integration)
+ * External access to mood evaluation reasons
+ */
+extern char latest_mood_reason[512];
+
 #ifdef __cplusplus
 }
 #endif

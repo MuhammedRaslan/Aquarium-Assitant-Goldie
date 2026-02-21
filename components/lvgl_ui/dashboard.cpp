@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 
 static const char *TAG = "dashboard";
 
@@ -267,6 +268,9 @@ static lv_obj_t *ai_med_result_label = NULL;   // Result display in AI screen
 // Latest calculation result (for AI integration) - exported for gemini_api
 char latest_med_calculation[512] = {0};
 
+// Latest mood reason (explains why mood is bad) - exported for gemini_api
+char latest_mood_reason[512] = {0};
+
 // Animation frame definitions
 #define FRAMES_PER_CATEGORY 8
 #define TOTAL_CATEGORIES 3
@@ -398,6 +402,183 @@ static void med_calc_close_event_cb(lv_event_t *e);
 static void med_calc_calculate_event_cb(lv_event_t *e);
 static void input_field_event_cb(lv_event_t *e);
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SD Card Logging Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define SD_LOG_DIR "/sdcard/logs"
+
+/**
+ * @brief Ensure log directory exists on SD card
+ */
+static bool ensure_log_directory(void) {
+    struct stat st;
+    if (stat(SD_LOG_DIR, &st) == -1) {
+        if (mkdir(SD_LOG_DIR, 0700) == -1) {
+            ESP_LOGE(TAG, "Failed to create log directory: %s (errno=%d)", SD_LOG_DIR, errno);
+            return false;
+        }
+        ESP_LOGI(TAG, "Created log directory: %s", SD_LOG_DIR);
+    }
+    return true;
+}
+
+/**
+ * @brief Save medication calculation to SD card
+ */
+static void save_medication_to_sd(void) {
+    if (!ensure_log_directory()) return;
+    
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/medication_%04d%02d%02d.csv",
+             SD_LOG_DIR, timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    
+    // Check if file exists to add header
+    bool file_exists = (access(filepath, F_OK) == 0);
+    
+    FILE *f = fopen(filepath, "a");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open medication log: %s (errno=%d)", filepath, errno);
+        return;
+    }
+    
+    // Write header if new file
+    if (!file_exists) {
+        fprintf(f, "DateTime,ProductAmount,Unit,PerVolume,PerUnit,TankSize,TankUnit,DosageML,DosageTsp,DosageTbsp\n");
+    }
+    
+    // Write log entry
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d,%.2f,%s,%.2f,%s,%.2f,%s,%.2f,%.2f,%.2f\n",
+            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+            med_calc_state.product_amount,
+            (med_calc_state.unit_type == 0) ? "ml" : 
+            (med_calc_state.unit_type == 1) ? "tsp" :
+            (med_calc_state.unit_type == 2) ? "tbsp" :
+            (med_calc_state.unit_type == 3) ? "drops" :
+            (med_calc_state.unit_type == 4) ? "fl oz" :
+            (med_calc_state.unit_type == 5) ? "cups" : "g",
+            med_calc_state.per_volume,
+            med_calc_state.is_gallons ? "gal" : "L",
+            med_calc_state.tank_size,
+            med_calc_state.tank_is_gallons ? "gal" : "L",
+            med_calc_state.calculated_dosage,
+            med_calc_state.calculated_dosage / 5.0f,
+            med_calc_state.calculated_dosage / 15.0f);
+    
+    fclose(f);
+    ESP_LOGI(TAG, "Medication log saved to SD: %s", filepath);
+}
+
+/**
+ * @brief Save parameter log to SD card
+ */
+static void save_parameters_to_sd(float ammonia, float nitrate, float nitrite, float ph) {
+    if (!ensure_log_directory()) return;
+    
+   time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/parameters_%04d%02d%02d.csv",
+             SD_LOG_DIR, timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    
+    bool file_exists = (access(filepath, F_OK) == 0);
+    
+    FILE *f = fopen(filepath, "a");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open parameter log: %s (errno=%d)", filepath, errno);
+        return;
+    }
+    
+    if (!file_exists) {
+        fprintf(f, "DateTime,Ammonia_ppm,Nitrate_ppm,Nitrite_ppm,pH\n");
+    }
+    
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d,%.3f,%.2f,%.3f,%.2f\n",
+            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+            ammonia, nitrate, nitrite, ph);
+    
+    fclose(f);
+    ESP_LOGI(TAG, "Parameter log saved to SD: %s", filepath);
+}
+
+/**
+ * @brief Save water change log to SD card
+ */
+static void save_water_change_to_sd(uint8_t interval_days) {
+    if (!ensure_log_directory()) return;
+    
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/water_change_%04d%02d%02d.csv",
+             SD_LOG_DIR, timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    
+    bool file_exists = (access(filepath, F_OK) == 0);
+    
+    FILE *f = fopen(filepath, "a");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open water change log: %s (errno=%d)", filepath, errno);
+        return;
+    }
+    
+    if (!file_exists) {
+        fprintf(f, "DateTime,PlannedIntervalDays\n");
+    }
+    
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d,%d\n",
+            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+            interval_days);
+    
+    fclose(f);
+    ESP_LOGI(TAG, "Water change log saved to SD: %s", filepath);
+}
+
+/**
+ * @brief Save feed log to SD card
+ */
+static void save_feed_to_sd(uint8_t feeds_per_day) {
+    if (!ensure_log_directory()) return;
+    
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/feed_%04d%02d%02d.csv",
+             SD_LOG_DIR, timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    
+    bool file_exists = (access(filepath, F_OK) == 0);
+    
+    FILE *f = fopen(filepath, "a");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open feed log: %s (errno=%d)", filepath, errno);
+        return;
+    }
+    
+    if (!file_exists) {
+        fprintf(f, "DateTime,FeedsPerDay\n");
+    }
+    
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d,%d\n",
+            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+            timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+            feeds_per_day);
+    
+    fclose(f);
+    ESP_LOGI(TAG, "Feed log saved to SD: %s", filepath);
+}
+
 /**
  * @brief Pure function: Calculate mood scores from parameters
  * 
@@ -506,13 +687,151 @@ extern "C" mood_result_t calculate_mood_scores(aquarium_params_t params, uint32_
                          result.feed_score +
                          result.clean_score;
     
-    // Determine mood category based on total score
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CRITICAL OVERRIDES - Single factors that force mood change (ALL 6 FACTORS)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Build mood reason string (clear latest_mood_reason if mood is good)
+    latest_mood_reason[0] = '\0';
+    
+    // OVERRIDE 1: Critical ammonia (-2) = ANGRY (fish death imminent)
+    if (result.ammonia_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: Ammonia %.2f ppm (TOXIC! Fish dying! Emergency water change needed!)",
+                 params.ammonia_ppm);
+        return result;
+    }
+    
+    // OVERRIDE 2: Critical nitrite (-2) = ANGRY (severe oxygen deprivation)
+    if (result.nitrite_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: Nitrite %.2f ppm (TOXIC! Severe oxygen deprivation! Water change NOW!)",
+                 params.nitrite_ppm);
+        return result;
+    }
+    
+    // OVERRIDE 3: Critical pH (-2) = ANGRY (extreme pH is lethal)
+    if (result.ph_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: pH %.1f (EXTREME! Lethal to fish! Adjust pH immediately!)",
+                 params.ph_level);
+        return result;
+    }
+    
+    // OVERRIDE 4: Critical nitrate (-2) = ANGRY (severe waste buildup)
+    if (result.nitrate_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: Nitrate %.0f ppm (VERY HIGH! Severe waste buildup! Water change urgently needed!)",
+                 params.nitrate_ppm);
+        return result;
+    }
+    
+    // OVERRIDE 5: Critical feed (-2) = ANGRY (fish starving)
+    if (result.feed_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        float hours_late = time_since_feed / 3600.0f;
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: Not fed for %.1f hours (STARVING! Feed immediately!)",
+                 hours_late);
+        return result;
+    }
+    
+    // OVERRIDE 6: Critical clean (-2) = ANGRY (water quality severely degraded)
+    if (result.clean_score <= -2) {
+        result.category = 2;  // ANGRY - immediate danger
+        float days_late = time_since_clean / 86400.0f;
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "🚨 CRITICAL: Water not changed for %.1f days (VERY OVERDUE! Poor water quality! Clean tank now!)",
+                 days_late);
+        return result;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // WARNING OVERRIDES - Prevent HAPPY mood when problems are present
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Build warning reason (multiple warnings possible)
+    char warning_reasons[512] = {0};
+    int warning_count = 0;
+    
+    // Warning ammonia/nitrite (never happy with toxins)
+    if (result.ammonia_score <= -1) {
+        warning_count++;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ Ammonia %.2f ppm (Detectable ammonia causing stress). ",
+                 params.ammonia_ppm);
+    }
+    if (result.nitrite_score <= -1) {
+        warning_count++;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ Nitrite %.2f ppm (Detectable nitrite causing gill damage). ",
+                 params.nitrite_ppm);
+    }
+    
+    // Warning pH
+    if (result.ph_score <= -1) {
+        warning_count++;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ pH %.1f (Approaching danger zone). ",
+                 params.ph_level);
+    }
+    
+    // Warning nitrate
+    if (result.nitrate_score <= -1) {
+        warning_count++;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ Nitrate %.0f ppm (High waste buildup, needs water change). ",
+                 params.nitrate_ppm);
+    }
+    
+    // Warning feed
+    if (result.feed_score <= -1) {
+        warning_count++;
+        float hours_late = time_since_feed / 3600.0f;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ Not fed for %.1f hours (Hungry, feed soon). ",
+                 hours_late);
+    }
+    
+    // Warning clean
+    if (result.clean_score <= -1) {
+        warning_count++;
+        float days_late = time_since_clean / 86400.0f;
+        snprintf(warning_reasons + strlen(warning_reasons), sizeof(warning_reasons) - strlen(warning_reasons),
+                 "⚠️ Water not changed for %.1f days (Overdue, clean soon). ",
+                 days_late);
+    }
+    
+    // If any warnings exist, force at least SAD mood
+    if (warning_count > 0) {
+        strcpy(latest_mood_reason, warning_reasons);
+        if (result.total_score >= 0) {
+            result.category = 1;  // SAD - warning conditions present
+        } else {
+            result.category = 2;  // ANGRY - warning + other problems
+        }
+        return result;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Normal mood determination (only if no critical or warning overrides)
+    // ═══════════════════════════════════════════════════════════════════════════
     if (result.total_score >= 6) {
         result.category = 0;  // ANIM_CATEGORY_HAPPY
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "😊 Everything is perfect! Water quality excellent, feeding on schedule, tank clean!");
     } else if (result.total_score >= 0) {
         result.category = 1;  // ANIM_CATEGORY_SAD
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "😐 Conditions are okay but could be better. Check parameters and schedules.");
     } else {
         result.category = 2;  // ANIM_CATEGORY_ANGRY
+        snprintf(latest_mood_reason, sizeof(latest_mood_reason),
+                 "😠 Multiple issues detected! Check water parameters, feeding, and cleaning schedules!");
     }
     
     return result;
@@ -1402,6 +1721,9 @@ static void main_button_event_cb(lv_event_t *e)
             
             ESP_LOGI(TAG, "Feed logged - Day index %d: %lu feeds", today_index, feed_log[today_index]);
             
+            // Save to SD card
+            save_feed_to_sd(feed_log_data[0].feeds_per_day);
+            
             // Re-evaluate mood and update button colors
             evaluate_and_update_mood();
             update_ai_assistant();
@@ -1422,6 +1744,9 @@ static void main_button_event_cb(lv_event_t *e)
             water_change_log[0].interval_days = 1;  // 1 click
             
             ESP_LOGI(TAG, "Water cleaned - Day index %d: %lu cleanings", today_index, water_log[today_index]);
+            
+            // Save to SD card
+            save_water_change_to_sd(water_change_log[0].interval_days);
             
             // Re-evaluate mood and update button colors
             evaluate_and_update_mood();
@@ -1544,6 +1869,9 @@ static void calculate_medication_dosage(void) {
     ESP_LOGI(TAG, "Universal dosage calculated: %.1f %s per %.1f %s for %.1f %s = %.2f ml",
              med_calc_state.product_amount, dose_unit, med_calc_state.per_volume, per_unit_str,
              med_calc_state.tank_size, tank_unit_str, dosage_ml);
+    
+    // Save to SD card
+    save_medication_to_sd();
     
     // Trigger AI update with new medication context
     update_ai_assistant();
@@ -1908,6 +2236,9 @@ static void save_param_log_cb(lv_event_t *e) {
         
         ESP_LOGI(TAG, "Parameters saved: NH3=%.2f, NO3=%.1f, NO2=%.2f, pH=%.1f",
                 ammonia_val, nitrate_val, nitrite_val, ph_val);
+        
+        // Save to SD card
+        save_parameters_to_sd(ammonia_val, nitrate_val, nitrite_val, ph_val);
     }
     
     close_popup();
@@ -2686,6 +3017,10 @@ static void create_water_popup(void) {
             planned_water_change_interval = interval;
             current_water_interval_days = interval;
             ESP_LOGI(TAG, "Water change interval updated: %lu days", (unsigned long)planned_water_change_interval);
+            
+            // Save to SD card
+            save_water_change_to_sd(interval);
+            
             // Refresh calendar dots to update hollow circles
             refresh_weekly_calendar_dots();
         }
@@ -2832,6 +3167,10 @@ static void create_feed_popup(void) {
         
         ESP_LOGI(TAG, "Feeds per day saved: %d (timestamp: %ld)", 
                  feed_log_data[0].feeds_per_day, feed_log_data[0].timestamp);
+        
+        // Save to SD card
+        save_feed_to_sd(feed_log_data[0].feeds_per_day);
+        
         evaluate_and_update_mood();
         close_popup();
     }, LV_EVENT_CLICKED, NULL);
