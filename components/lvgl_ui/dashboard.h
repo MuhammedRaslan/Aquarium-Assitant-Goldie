@@ -85,6 +85,12 @@ void dashboard_simulate_feed_time(float hours_ago);
  */
 void dashboard_simulate_clean_time(float days_ago);
 
+/**
+ * @brief Latest medication calculation result (for AI integration)
+ * External access to medication calculator data
+ */
+extern char latest_med_calculation[512];
+
 #ifdef __cplusplus
 }
 #endif

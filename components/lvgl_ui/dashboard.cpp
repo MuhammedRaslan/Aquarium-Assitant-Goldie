@@ -198,6 +198,75 @@ static feed_time_t planned_feed_times[MAX_FEED_TIMES] = {
 };
 // static uint8_t planned_water_change_interval = 7;  // Days between water changes (OLD - replaced with seconds at line 209)
 
+// ═════════════════════════════════════════════════════════════════════════════
+// MEDICATION CALCULATOR
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Medication types
+typedef enum {
+    MED_ICH_TREATMENT = 0,
+    MED_FUNGAL_TREATMENT,
+    MED_ANTIBIOTICS,
+    MED_ANTI_PARASITIC,
+    MED_WATER_CONDITIONER,
+    MED_TYPE_COUNT
+} medication_type_t;
+
+// Medication dosage data structure
+typedef struct {
+    const char *name;
+    float dosage_per_gallon_ml;  // ml per gallon
+    float dosage_per_liter_ml;   // ml per liter
+    const char *instructions;
+} medication_data_t;
+
+// Pre-configured medication dosages (standard industry values)
+static const medication_data_t medication_database[MED_TYPE_COUNT] = {
+    {"Ich Treatment", 5.0, 1.32, "Treat daily for 3 days, then 25% water change"},
+    {"Fungal Treatment", 2.5, 0.66, "Treat every other day for 1 week"},
+    {"Antibiotics", 250.0, 66.0, "Dose every 24h for 5 days, remove carbon filter"},
+    {"Anti-parasitic", 1.0, 0.26, "Single dose, repeat after 48 hours if needed"},
+    {"Water Conditioner", 2.0, 0.53, "Use during water changes"}
+};
+
+// Calculator state - Universal dosage calculator
+typedef struct {
+    float product_amount;     // Amount of product (e.g., 5 ml)
+    float per_volume;         // Per X gallons/litres (e.g., 10)
+    float tank_size;          // Tank size
+    bool is_gallons;          // true = gallons, false = liters (for "Per" field)
+    bool tank_is_gallons;     // true = gallons, false = liters (for "Tank Size" field)
+    int unit_type;            // 0=ml, 1=tsp, 2=tbsp, 3=drops, 4=fl oz, 5=cups, 6=g
+    float calculated_dosage;
+    char result_text[256];
+} med_calculator_state_t;
+
+static med_calculator_state_t med_calc_state = {
+    .product_amount = 5.0,
+    .per_volume = 10.0,
+    .tank_size = 0.0,
+    .is_gallons = false,
+    .tank_is_gallons = false,
+    .unit_type = 0,  // Default to ml
+    .calculated_dosage = 0.0,
+    .result_text = {0}
+};
+
+// Calculator UI objects
+static lv_obj_t *btn_med_calc = NULL;          // Medication calculator button in calendar panel
+static lv_obj_t *popup_med_calc = NULL;        // Calculator popup
+static lv_obj_t *med_product_amount_input = NULL;  // Product amount input
+static lv_obj_t *med_unit_dropdown = NULL;     // Unit type selector (ml/tsp/tbsp/drops/fl oz/cups/g)
+static lv_obj_t *med_per_volume_input = NULL;  // Per X gallons/litres input
+static lv_obj_t *med_tank_size_input = NULL;   // Tank size input
+static lv_obj_t *med_unit_switch = NULL;       // Gallon/Liter toggle for "Per" field
+static lv_obj_t *med_tank_unit_switch = NULL;  // Gallon/Liter toggle for "Tank Size" field
+static lv_obj_t *med_result_label = NULL;      // Result display in popup
+static lv_obj_t *ai_med_result_label = NULL;   // Result display in AI screen
+
+// Latest calculation result (for AI integration) - exported for gemini_api
+char latest_med_calculation[512] = {0};
+
 // Animation frame definitions
 #define FRAMES_PER_CATEGORY 8
 #define TOTAL_CATEGORIES 3
@@ -323,6 +392,11 @@ static lv_color_t score_to_rgb_color(int score);
 static void update_button_colors(void);
 static void animation_init_timer_cb(lv_timer_t *timer);
 static void animation_timer_cb(lv_timer_t *timer);
+static void calculate_medication_dosage(void);
+static void show_med_calculator_popup(void);
+static void med_calc_close_event_cb(lv_event_t *e);
+static void med_calc_calculate_event_cb(lv_event_t *e);
+static void input_field_event_cb(lv_event_t *e);
 
 /**
  * @brief Pure function: Calculate mood scores from parameters
@@ -1369,7 +1443,300 @@ static void close_popup(void) {
     if (popup_history) { lv_obj_del(popup_history); popup_history = NULL; }
     if (popup_keypad) { lv_obj_del(popup_keypad); popup_keypad = NULL; }
     if (popup_monthly_cal) { lv_obj_del(popup_monthly_cal); popup_monthly_cal = NULL; }
+    if (popup_med_calc) { lv_obj_del(popup_med_calc); popup_med_calc = NULL; }
     active_input_field = NULL;
+}
+
+/**
+ * @brief Calculate medication dosage based on current state
+ */
+static void calculate_medication_dosage(void) {
+    // Get input values
+    const char *amount_text = lv_textarea_get_text(med_product_amount_input);
+    const char *per_volume_text = lv_textarea_get_text(med_per_volume_input);
+    const char *tank_size_text = lv_textarea_get_text(med_tank_size_input);
+    
+    med_calc_state.product_amount = atof(amount_text);
+    med_calc_state.per_volume = atof(per_volume_text);
+    med_calc_state.tank_size = atof(tank_size_text);
+    med_calc_state.unit_type = lv_dropdown_get_selected(med_unit_dropdown);
+    
+    // Validate inputs
+    if (med_calc_state.product_amount <= 0 || med_calc_state.per_volume <= 0 || med_calc_state.tank_size <= 0) {
+        lv_label_set_text(med_result_label, "❌ Invalid input!\nAll values must be positive numbers.");
+        return;
+    }
+    
+    // Get unit strings
+    const char *unit_names[] = {"ml", "tsp", "tbsp", "drops", "fl oz", "cups", "g"};
+    const char *per_unit_str = med_calc_state.is_gallons ? "gal" : "L";
+    const char *tank_unit_str = med_calc_state.tank_is_gallons ? "gal" : "L";
+    const char *dose_unit = unit_names[med_calc_state.unit_type];
+    
+    // Convert product amount to ml for calculation
+    float product_amount_ml = med_calc_state.product_amount;
+    switch (med_calc_state.unit_type) {
+        case 0: break;                              // ml - no conversion
+        case 1: product_amount_ml *= 5.0; break;    // tsp to ml
+        case 2: product_amount_ml *= 15.0; break;   // tbsp to ml
+        case 3: product_amount_ml *= 0.05; break;   // drops to ml (1 drop ≈ 0.05ml)
+        case 4: product_amount_ml *= 29.5735; break; // fl oz to ml
+        case 5: product_amount_ml *= 236.588; break; // cups to ml (US cup)
+        case 6: product_amount_ml *= 1.0; break;    // grams to ml (assuming 1:1 for liquids)
+        default: break;
+    }
+    
+    // Convert volumes to same unit (liters) for calculation
+    float per_volume_l = med_calc_state.per_volume;
+    if (med_calc_state.is_gallons) per_volume_l *= 3.78541;  // gallons to liters
+    
+    float tank_size_l = med_calc_state.tank_size;
+    if (med_calc_state.tank_is_gallons) tank_size_l *= 3.78541;  // gallons to liters
+    
+    // Universal formula: (tank_size / per_volume) * product_amount
+    float dosage_ml = (tank_size_l / per_volume_l) * product_amount_ml;
+    med_calc_state.calculated_dosage = dosage_ml;
+    
+    // Calculate alternative measurements
+    float dosage_tsp = dosage_ml / 5.0;
+    float dosage_tbsp = dosage_ml / 15.0;
+    float dosage_drops = dosage_ml / 0.05;
+    float dosage_floz = dosage_ml / 29.5735;
+    
+    // Format result text
+    snprintf(med_calc_state.result_text, sizeof(med_calc_state.result_text),
+             "✅ Total Dosage for %.1f %s tank:\n\n"
+             "Based on: %.1f %s per %.1f %s\n\n"
+             "Add to tank:\n"
+             "🧪 %.2f ml\n"
+             "🥄 %.2f tsp\n"
+             "🥄 %.2f tbsp\n"
+             "💧 %.0f drops\n"
+             "🧴 %.2f fl oz",
+             med_calc_state.tank_size, tank_unit_str,
+             med_calc_state.product_amount, dose_unit, med_calc_state.per_volume, per_unit_str,
+             dosage_ml, dosage_tsp, dosage_tbsp, dosage_drops, dosage_floz);
+    
+    // Update result label in popup
+    lv_label_set_text(med_result_label, med_calc_state.result_text);
+    
+    // Store for AI integration
+    snprintf(latest_med_calculation, sizeof(latest_med_calculation),
+             "UNIVERSAL DOSAGE CALCULATION:\n"
+             "- Product: %.1f %s per %.1f %s\n"
+             "- Tank Size: %.1f %s\n"
+             "- Total Dosage: %.2f ml (%.2f tsp)\n",
+             med_calc_state.product_amount, dose_unit, med_calc_state.per_volume, per_unit_str,
+             med_calc_state.tank_size, tank_unit_str,
+             dosage_ml, dosage_tsp);
+    
+    // Update AI screen display if it exists
+    if (ai_med_result_label) {
+        char ai_display[256];
+        snprintf(ai_display, sizeof(ai_display),
+                 "💊 Dosage Calc: %.1f%s/%.1f%s\n"
+                 "Tank %.1f%s → Add %.2f ml",
+                 med_calc_state.product_amount, dose_unit, med_calc_state.per_volume, per_unit_str,
+                 med_calc_state.tank_size, tank_unit_str, dosage_ml);
+        lv_label_set_text(ai_med_result_label, ai_display);
+    }
+    
+    ESP_LOGI(TAG, "Universal dosage calculated: %.1f %s per %.1f %s for %.1f %s = %.2f ml",
+             med_calc_state.product_amount, dose_unit, med_calc_state.per_volume, per_unit_str,
+             med_calc_state.tank_size, tank_unit_str, dosage_ml);
+    
+    // Trigger AI update with new medication context
+    update_ai_assistant();
+}
+
+/**
+ * @brief Close calculator popup event callback
+ */
+static void med_calc_close_event_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if (popup_med_calc) {
+            lv_obj_del(popup_med_calc);
+            popup_med_calc = NULL;
+        }
+    }
+}
+
+/**
+ * @brief Calculate button event callback
+ */
+static void med_calc_calculate_event_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        calculate_medication_dosage();
+    }
+}
+
+/**
+ * @brief Unit toggle switch event callback for "Per" field
+ */
+static void med_unit_switch_event_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        lv_obj_t *sw = lv_event_get_target(e);
+        med_calc_state.is_gallons = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        ESP_LOGI(TAG, "Per field unit switched to: %s", med_calc_state.is_gallons ? "Gallons" : "Liters");
+    }
+}
+
+/**
+ * @brief Tank unit toggle switch event callback
+ */
+static void med_tank_unit_switch_event_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        lv_obj_t *sw = lv_event_get_target(e);
+        med_calc_state.tank_is_gallons = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        ESP_LOGI(TAG, "Tank size unit switched to: %s", med_calc_state.tank_is_gallons ? "Gallons" : "Liters");
+    }
+}
+
+/**
+ * @brief Medication type dropdown event callback
+ */
+// Removed - no longer needed for Universal calculator
+// static void med_type_dropdown_event_cb(lv_event_t *e) {
+//     if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+//         lv_obj_t *dropdown = lv_event_get_target(e);
+//         med_calc_state.med_type = (medication_type_t)lv_dropdown_get_selected(dropdown);
+//         ESP_LOGI(TAG, "Medication type changed to: %s",
+//                  medication_database[med_calc_state.med_type].name);
+//     }
+// }
+
+/**
+ * @brief Show medication calculator popup
+ */
+/**
+ * @brief Show medication calculator popup
+ */
+static void show_med_calculator_popup(void) {
+    // Close any existing popups
+    close_popup();
+    
+    // Create full-screen popup overlay
+    popup_med_calc = lv_obj_create(scroll_container);
+    lv_obj_set_size(popup_med_calc, 440, 300);
+    lv_obj_set_pos(popup_med_calc, 20, 490);  // Y=490 (calendar panel area)
+    lv_obj_set_style_bg_color(popup_med_calc, lv_color_hex(0x1a1a1a), 0);
+    lv_obj_set_style_border_width(popup_med_calc, 3, 0);
+    lv_obj_set_style_border_color(popup_med_calc, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_radius(popup_med_calc, 10, 0);
+    lv_obj_set_scrollbar_mode(popup_med_calc, LV_SCROLLBAR_MODE_AUTO);  // Enable scrollbar
+    lv_obj_set_scroll_dir(popup_med_calc, LV_DIR_VER);  // Vertical scrolling
+    
+    // Title
+    lv_obj_t *title = lv_label_create(popup_med_calc);
+    lv_label_set_text(title, "💊 Universal Dosage Calculator");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_pos(title, 10, 8);
+    
+    // Row 1: Amount of Product
+    lv_obj_t *amount_label = lv_label_create(popup_med_calc);
+    lv_label_set_text(amount_label, "Amount:");
+    lv_obj_set_style_text_color(amount_label, lv_color_white(), 0);
+    lv_obj_set_pos(amount_label, 20, 45);
+    
+    med_product_amount_input = lv_textarea_create(popup_med_calc);
+    lv_obj_set_size(med_product_amount_input, 80, 35);
+    lv_obj_set_pos(med_product_amount_input, 100, 40);
+    lv_textarea_set_one_line(med_product_amount_input, true);
+    lv_textarea_set_text(med_product_amount_input, "5");
+    lv_obj_add_event_cb(med_product_amount_input, input_field_event_cb, LV_EVENT_CLICKED, NULL);
+    
+    // Unit dropdown (ml, tsp, tbsp, drops, fl oz, cups, g)
+    med_unit_dropdown = lv_dropdown_create(popup_med_calc);
+    lv_obj_set_size(med_unit_dropdown, 80, 35);
+    lv_obj_set_pos(med_unit_dropdown, 195, 40);
+    lv_dropdown_set_options(med_unit_dropdown, "ml\ntsp\ntbsp\ndrops\nfl oz\ncups\ng");
+    
+    // Row 2: Per X gallons/litres
+    lv_obj_t *per_label = lv_label_create(popup_med_calc);
+    lv_label_set_text(per_label, "Per:");
+    lv_obj_set_style_text_color(per_label, lv_color_white(), 0);
+    lv_obj_set_pos(per_label, 20, 90);
+    
+    med_per_volume_input = lv_textarea_create(popup_med_calc);
+    lv_obj_set_size(med_per_volume_input, 80, 35);
+    lv_obj_set_pos(med_per_volume_input, 100, 85);
+    lv_textarea_set_one_line(med_per_volume_input, true);
+    lv_textarea_set_text(med_per_volume_input, "10");
+    lv_obj_add_event_cb(med_per_volume_input, input_field_event_cb, LV_EVENT_CLICKED, NULL);
+    
+    // Unit toggle (L/Gal)
+    lv_obj_t *unit_label_l = lv_label_create(popup_med_calc);
+    lv_label_set_text(unit_label_l, "L");
+    lv_obj_set_style_text_color(unit_label_l, lv_color_white(), 0);
+    lv_obj_set_pos(unit_label_l, 195, 92);
+    
+    med_unit_switch = lv_switch_create(popup_med_calc);
+    lv_obj_set_pos(med_unit_switch, 220, 88);
+    lv_obj_add_event_cb(med_unit_switch, med_unit_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    
+    lv_obj_t *unit_label_g = lv_label_create(popup_med_calc);
+    lv_label_set_text(unit_label_g, "Gal");
+    lv_obj_set_style_text_color(unit_label_g, lv_color_white(), 0);
+    lv_obj_set_pos(unit_label_g, 275, 92);
+    
+    // Row 3: Tank Size with L/Gal toggle
+    lv_obj_t *tank_label = lv_label_create(popup_med_calc);
+    lv_label_set_text(tank_label, "Tank Size:");
+    lv_obj_set_style_text_color(tank_label, lv_color_white(), 0);
+    lv_obj_set_pos(tank_label, 20, 135);
+    
+    med_tank_size_input = lv_textarea_create(popup_med_calc);
+    lv_obj_set_size(med_tank_size_input, 80, 35);
+    lv_obj_set_pos(med_tank_size_input, 120, 130);
+    lv_textarea_set_one_line(med_tank_size_input, true);
+    lv_textarea_set_text(med_tank_size_input, "50");
+    lv_obj_add_event_cb(med_tank_size_input, input_field_event_cb, LV_EVENT_CLICKED, NULL);
+    
+    // Tank Size Unit toggle (L/Gal)
+    lv_obj_t *tank_unit_label_l = lv_label_create(popup_med_calc);
+    lv_label_set_text(tank_unit_label_l, "L");
+    lv_obj_set_style_text_color(tank_unit_label_l, lv_color_white(), 0);
+    lv_obj_set_pos(tank_unit_label_l, 215, 137);
+    
+    med_tank_unit_switch = lv_switch_create(popup_med_calc);
+    lv_obj_set_pos(med_tank_unit_switch, 240, 133);
+    lv_obj_add_event_cb(med_tank_unit_switch, med_tank_unit_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    
+    lv_obj_t *tank_unit_label_g = lv_label_create(popup_med_calc);
+    lv_label_set_text(tank_unit_label_g, "Gal");
+    lv_obj_set_style_text_color(tank_unit_label_g, lv_color_white(), 0);
+    lv_obj_set_pos(tank_unit_label_g, 295, 137);
+    
+    // Calculate button
+    lv_obj_t *btn_calc = lv_btn_create(popup_med_calc);
+    lv_obj_set_size(btn_calc, 120, 40);
+    lv_obj_set_pos(btn_calc, 20, 185);
+    lv_obj_set_style_bg_color(btn_calc, lv_color_hex(0x00aa00), 0);
+    lv_obj_add_event_cb(btn_calc, med_calc_calculate_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *calc_lbl = lv_label_create(btn_calc);
+    lv_label_set_text(calc_lbl, "Calculate");
+    lv_obj_center(calc_lbl);
+    
+    // Close button - moved next to Calculate button
+    lv_obj_t *btn_close = lv_btn_create(popup_med_calc);
+    lv_obj_set_size(btn_close, 80, 40);
+    lv_obj_set_pos(btn_close, 155, 185);
+    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0xff0000), 0);
+    lv_obj_add_event_cb(btn_close, med_calc_close_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *close_lbl = lv_label_create(btn_close);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_center(close_lbl);
+    
+    // Result display - positioned below buttons, extends beyond viewport to enable scrolling
+    med_result_label = lv_label_create(popup_med_calc);
+    lv_obj_set_size(med_result_label, 400, 200);
+    lv_obj_set_pos(med_result_label, 20, 240);
+    lv_label_set_long_mode(med_result_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(med_result_label, lv_color_hex(0x00ff00), 0);
+    lv_label_set_text(med_result_label, "Enter values and click Calculate.");
+    
+    ESP_LOGI(TAG, "Universal dosage calculator popup opened on calendar page");
 }
 
 /**
@@ -1424,17 +1791,39 @@ static void show_keypad(lv_obj_t *input_field) {
     // Clear the input field when keypad opens (replace instead of append)
     lv_textarea_set_text(active_input_field, "");
     
-    popup_keypad = lv_obj_create(panel_content);
-    lv_obj_set_size(popup_keypad, 440, 280);  // Match panel_content size
-    lv_obj_set_pos(popup_keypad, 0, 0);  // Fill entire panel_content
+    // Check if input field is inside medication calculator popup
+    bool is_med_calc_input = false;
+    lv_obj_t *parent = lv_obj_get_parent(input_field);
+    while (parent != NULL) {
+        if (parent == popup_med_calc) {
+            is_med_calc_input = true;
+            break;
+        }
+        parent = lv_obj_get_parent(parent);
+    }
+    
+    // Create keypad in appropriate container
+    if (is_med_calc_input && popup_med_calc) {
+        // Create keypad inside medication calculator popup
+        popup_keypad = lv_obj_create(popup_med_calc);
+        lv_obj_set_size(popup_keypad, 440, 300);  // Match popup_med_calc size
+        lv_obj_set_pos(popup_keypad, 0, 0);  // Fill entire popup
+    } else {
+        // Create keypad inside panel_content (for other inputs)
+        popup_keypad = lv_obj_create(panel_content);
+        lv_obj_set_size(popup_keypad, 440, 280);  // Match panel_content size
+        lv_obj_set_pos(popup_keypad, 0, 0);  // Fill entire panel_content
+    }
+    
     lv_obj_set_style_bg_color(popup_keypad, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(popup_keypad, LV_OPA_80, 0);
     lv_obj_set_style_border_width(popup_keypad, 0, 0);
     lv_obj_clear_flag(popup_keypad, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(popup_keypad, 0, 0);  // Remove padding
     
     lv_obj_t *keypad_cont = lv_obj_create(popup_keypad);
     lv_obj_set_size(keypad_cont, 300, 260);
-    lv_obj_center(keypad_cont);
+    lv_obj_set_pos(keypad_cont, 70, 20);  // Centered: (440-300)/2=70, (300-260)/2=20
     lv_obj_set_style_bg_color(keypad_cont, lv_color_hex(0x2a2a2a), 0);
     
     // Add display area at top showing current value
@@ -2472,6 +2861,9 @@ static void calendar_button_event_cb(lv_event_t *e) {
         create_water_popup();
     } else if (btn == btn_feed_log) {
         create_feed_popup();
+    } else if (btn == btn_med_calc) {
+        ESP_LOGI(TAG, "Med Calc button clicked - opening popup");
+        show_med_calculator_popup();
     }
 }
 
@@ -2609,10 +3001,10 @@ void dashboard_init(void)
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), LV_PART_MAIN);
     
-    // Create a scrollable container that's taller than the screen (landscape: 480×800 total)
-    // Layout: Animation+Gauges (0-320px) + AI Assistant (320-470px) + Panel (470-800px)
+    // Create a scrollable container that's taller than the screen (landscape: 480×790 total)
+    // Layout: Animation+Gauges (0-320px) + AI Assistant (320-470px) + Panel (470-790px)
     scroll_container = lv_obj_create(scr);
-    lv_obj_set_size(scroll_container, 480, 800);  // 480 wide, 800 tall (2.5× screen height)
+    lv_obj_set_size(scroll_container, 480, 790);  // 480 wide, 790 tall
     lv_obj_set_pos(scroll_container, 0, 0);
     lv_obj_set_style_bg_color(scroll_container, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_border_width(scroll_container, 0, LV_PART_MAIN);
@@ -2710,7 +3102,7 @@ void dashboard_init(void)
     // Create AI assistant background
     lv_obj_t *ai_bg = lv_obj_create(scroll_container);
     lv_obj_set_size(ai_bg, 480, 150);
-    lv_obj_set_pos(ai_bg, 0, 320);  // Moved to Y=320
+    lv_obj_set_pos(ai_bg, 0, 320);  // After animation section
     lv_obj_set_style_bg_color(ai_bg, lv_color_hex(0x1a1a3a), LV_PART_MAIN);
     lv_obj_set_style_border_width(ai_bg, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(ai_bg, lv_palette_main(LV_PALETTE_CYAN), LV_PART_MAIN);
@@ -2726,10 +3118,18 @@ void dashboard_init(void)
     // AI advice/status text area
     ai_text_label = lv_label_create(ai_bg);
     lv_label_set_text(ai_text_label, "System initializing...\nAnalyzing aquarium parameters...");
-    lv_obj_set_size(ai_text_label, 465, 90);
-    lv_obj_set_pos(ai_text_label, 0, 40);
+    lv_obj_set_size(ai_text_label, 465, 60);
+    lv_obj_set_pos(ai_text_label, 0, 35);
     lv_obj_set_style_text_color(ai_text_label, lv_color_white(), 0);
     lv_label_set_long_mode(ai_text_label, LV_LABEL_LONG_WRAP);
+    
+    // Medication calculator result display in AI section
+    ai_med_result_label = lv_label_create(ai_bg);
+    lv_label_set_text(ai_med_result_label, "");
+    lv_obj_set_size(ai_med_result_label, 465, 40);
+    lv_obj_set_pos(ai_med_result_label, 0, 100);
+    lv_obj_set_style_text_color(ai_med_result_label, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_label_set_long_mode(ai_med_result_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     
     // Create circular buttons at Y=190 (replacing gauges)
     btn_feed_main = create_circular_button(scroll_container, "FEED", LV_ALIGN_TOP_LEFT, 30, 220);
@@ -2742,7 +3142,7 @@ void dashboard_init(void)
     lv_obj_move_foreground(btn_feed_main);
     lv_obj_move_foreground(btn_water_main);
     
-    // ===== PANEL SECTION (470-800px) =====
+    // ===== PANEL SECTION (470-790px) =====
     
     // Create panel background
     lv_obj_t *panel_bg = lv_obj_create(scroll_container);
@@ -2930,6 +3330,18 @@ void dashboard_init(void)
     lv_label_set_text(label3, "Feed");
     lv_obj_center(label3);
     lv_obj_add_event_cb(btn_feed_log, calendar_button_event_cb, LV_EVENT_CLICKED, NULL);
+
+    // Add Medication Calculator button - vertical tall button to the right of all 3 buttons
+    int med_calc_height = btn_spacing * 2 + 45;  // Spans all 3 buttons (Parameters, Water, Feed)
+    btn_med_calc = lv_btn_create(panel_content);
+    lv_obj_set_size(btn_med_calc, 38, med_calc_height);  // Narrow width, tall height
+    lv_obj_set_pos(btn_med_calc, btn_x + 105, btn_start_y);  // To the right with 5px gap
+    lv_obj_set_style_bg_color(btn_med_calc, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_t *label4 = lv_label_create(btn_med_calc);
+    lv_label_set_text(label4, "M\ne\nd\n\nC\na\nl\nc");  // Vertical text with breaks
+    lv_obj_set_style_text_align(label4, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(label4);
+    lv_obj_add_event_cb(btn_med_calc, calendar_button_event_cb, LV_EVENT_CLICKED, NULL);
     
     ESP_LOGI(TAG, "Scrollable dashboard with animation and panel created successfully");
     

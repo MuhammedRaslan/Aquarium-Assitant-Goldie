@@ -6,7 +6,7 @@
 #define WIFI_PASS "1234567888"
 
 // Groq AI API configuration
-#define GROQ_API_KEY "YOUR_API_KEY_HERE"
+#define GROQ_API_KEY "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"
 #define GROQ_API_URL "https://api.groq.com/openai/v1/chat/completions"
 
 #endif // WIFI_CONFIG_H

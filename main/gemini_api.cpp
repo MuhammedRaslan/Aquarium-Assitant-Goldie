@@ -1,5 +1,6 @@
 #include "gemini_api.h"
 #include "wifi_config.h"
+#include "dashboard.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -285,8 +286,8 @@ bool gemini_query_aquarium(float ammonia_ppm, float nitrite_ppm, float nitrate_p
     }
 
     // Build the prompt with Goldie personality - focusing on nitrogen cycle
-    char prompt[768];
-    snprintf(prompt, sizeof(prompt),
+    char prompt[1024];
+    int prompt_len = snprintf(prompt, sizeof(prompt),
         "You are Goldie, a friendly and caring goldfish who lives in this aquarium! 🐠\n"
         "Respond in first-person as Goldie with a cheerful, bubbly personality (max 80 words).\n\n"
         "Current water quality (Nitrogen Cycle):\n"
@@ -298,10 +299,20 @@ bool gemini_query_aquarium(float ammonia_ppm, float nitrite_ppm, float nitrate_p
         "⏰ Last fed: %.1f hours ago\n\n"
         "Water maintenance:\n"
         "💧 Water change interval: every %d days\n"
-        "🧽 Last cleaned: %.1f days ago\n\n"
-        "As Goldie, comment on how you're feeling in these conditions and give friendly advice!",
+        "🧽 Last cleaned: %.1f days ago\n",
         ammonia_ppm, nitrite_ppm, nitrate_ppm, feeds_per_day, hours_since_feed, 
         water_change_interval, days_since_clean);
+    
+    // Append medication context if available
+    if (latest_med_calculation[0] != '\0') {
+        prompt_len += snprintf(prompt + prompt_len, sizeof(prompt) - prompt_len,
+                              "\n%s\n", latest_med_calculation);
+    }
+    
+    // Add closing instruction
+    snprintf(prompt + prompt_len, sizeof(prompt) - prompt_len,
+             "\nAs Goldie, comment on how you're feeling in these conditions and give friendly advice!");
+
 
     // Build JSON request body for Groq (OpenAI-compatible format)
     cJSON *root = cJSON_CreateObject();
